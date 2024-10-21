@@ -1,143 +1,141 @@
-import json
-from flask import request, _request_ctx_stack
+# server.py
+
+import os
 from functools import wraps
-from jose import jwt
-from urllib.request import urlopen
 
+from dotenv import load_dotenv
+from flask import Flask, request, jsonify
+import jwt
+from jwt import exceptions as jwt_exceptions
+import requests
+import unittest
 
-AUTH0_DOMAIN = 'dev-i6mkw7r670gmhfzt.us.auth0.com'
+# Load environment variables from a .env file
+load_dotenv()
+
+# Configuration variables (ensure these are set in your environment or .env file)
+AUTH0_DOMAIN = os.getenv('AUTH0_DOMAIN')
+API_AUDIENCE = os.getenv('API_AUDIENCE')
 ALGORITHMS = ['RS256']
-API_AUDIENCE = 'https://jcscoffeeshop510699.com/auth/api'
+CLIENT_ID = os.getenv('CLIENT_ID')
+CLIENT_SECRET = os.getenv('CLIENT_SECRET')
 
-## AuthError Exception
-'''
-AuthError Exception
-A standardized way to communicate auth failure modes
-'''
-class AuthError(Exception):
-    def __init__(self, error, status_code):
-        self.error = error
-        self.status_code = status_code
-
+app = Flask(__name__)
 
 def get_token_auth_header():
-    """Obtains the Access Token from the Authorization Header"""
-    auth = request.headers.get('Authorization', None)
+    """Obtains the Access Token from the Authorization Header."""
+    auth = request.headers.get("Authorization", None)
     if not auth:
-        raise AuthError({
-            'code': 'authorization_header_missing',
-            'description': 'Authorization header is expected.'
-        }, 401)
-        
-    print('still going')
+        return {"code": "authorization_header_missing",
+                "description": "Authorization header is expected"}, 401
+
     parts = auth.split()
-    
-    if parts[0].lower() != 'bearer':
-        raise AuthError({
-            'code': 'invalid_header',
-            'description': 'Authorization header must start with Bearer.'
-        }, 401)
+
+    if parts[0].lower() != "bearer":
+        return {"code": "invalid_header",
+                "description": "Authorization header must start with Bearer"}, 401
     elif len(parts) == 1:
-        raise AuthError({
-            'code': 'invalid_header',
-            'description': 'Token not found.'
-        }, 401)
+        return {"code": "invalid_header",
+                "description": "Token not found"}, 401
     elif len(parts) > 2:
-        raise AuthError({
-            'code': 'invalid_header',
-            'description': 'Authorization header must be Bearer token.'
-        }, 401)
-        
+        return {"code": "invalid_header",
+                "description": "Authorization header must be Bearer token"}, 401
+
     token = parts[1]
     return token
 
-def check_permissions(permission, payload):
-    """Check if the required permission is in the JWT payload"""
-    if 'permissions' not in payload:
-        raise AuthError({
-            'code': 'invalid_claims',
-            'description': 'Permissions not included in JWT.'
-        }, 400)
+def requires_auth(f):
+    """Decorator to require authentication on routes."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = get_token_auth_header()
+        if isinstance(token, tuple):
+            return jsonify(token[0]), token[1]
 
-    if permission not in payload['permissions']:
-        raise AuthError({
-            'code': 'unauthorized',
-            'description': 'Permission not found.'
-        }, 403)
-    return True
+        jwks_url = f'https://{AUTH0_DOMAIN}/.well-known/jwks.json'
+        jwk_client = jwt.PyJWKClient(jwks_url)
 
-def verify_decode_jwt(token):
-    """Verifies and decodes a JWT from Auth0"""
-    jsonurl = urlopen(f'https://{AUTH0_DOMAIN}/.well-known/jwks.json')
-    jwks = json.loads(jsonurl.read())
-    unverified_header = jwt.get_unverified_header(token)
-    
-    print(unverified_header)
-    
-    rsa_key = {}
-    if 'kid' not in unverified_header:
-        raise AuthError({
-            'code': 'invalid_header',
-            'description': 'Authorization malformed.'
-        }, 401)
-
-    print('after kid')
-    
-    for key in jwks['keys']:
-        if key['kid'] == unverified_header['kid']:
-            rsa_key = {
-                'kty': key['kty'],
-                'kid': key['kid'],
-                'use': key['use'],
-                'n': key['n'],
-                'e': key['e']
-            }
-
-    if rsa_key:
         try:
+            signing_key = jwk_client.get_signing_key_from_jwt(token)
             payload = jwt.decode(
                 token,
-                rsa_key,
+                signing_key.key,
                 algorithms=ALGORITHMS,
                 audience=API_AUDIENCE,
-                issuer='https://' + AUTH0_DOMAIN + '/'
+                issuer=f'https://{AUTH0_DOMAIN}/'
             )
-            return payload
+        except jwt_exceptions.ExpiredSignatureError:
+            return jsonify({"code": "token_expired",
+                            "description": "Token is expired"}), 401
+        except (jwt_exceptions.InvalidAudienceError, jwt_exceptions.InvalidIssuerError):
+            return jsonify({"code": "invalid_claims",
+                            "description": "Incorrect claims, please check the audience and issuer"}), 401
+        except jwt_exceptions.PyJWTError as e:
+            return jsonify({"code": "invalid_header",
+                            "description": f"Unable to parse authentication token: {str(e)}"}), 401
 
-        except jwt.ExpiredSignatureError:
-            raise AuthError({
-                'code': 'token_expired',
-                'description': 'Token expired.'
-            }, 401)
+        # Token is valid; print it in the terminal
+        print(f"Authenticated token: {token}")
+        return f(*args, **kwargs)
+    return decorated
 
-        except jwt.JWTClaimsError:
-            raise AuthError({
-                'code': 'invalid_claims',
-                'description': 'Incorrect claims. Please, check the audience and issuer.'
-            }, 401)
+@app.route('/public')
+def public():
+    """Public route accessible without authentication."""
+    return jsonify(message="Hello from a public endpoint! You don't need to be authenticated to see this.")
 
-        except Exception:
-            raise AuthError({
-                'code': 'invalid_header',
-                'description': 'Unable to parse authentication token.'
-            }, 400)
-    raise AuthError({
-        'code': 'invalid_header',
-        'description': 'Unable to find the appropriate key.'
-    }, 400)
+@app.route('/private')
+@requires_auth
+def private():
+    """Private route accessible only with valid authentication."""
+    return jsonify(message="Hello from a private endpoint! You are authenticated.")
 
-def requires_auth(permission=''):
-    """Determines if the Access Token is valid and if the user has the required permission"""
-    def requires_auth_decorator(f):
-        @wraps(f)
-        def wrapper(*args, **kwargs):
-            print('level 3')
-            token = get_token_auth_header()
-            print(f'Token: ', token)
-            payload = verify_decode_jwt(token)
-            print(f'Payload: ', payload)
-            check_permissions(permission, payload)
-            return f(payload, *args, **kwargs)
+def get_access_token():
+    """Obtains an access token from Auth0 using client credentials."""
+    url = f'https://{AUTH0_DOMAIN}/oauth/token'
+    headers = {'content-type': 'application/json'}
+    data = {
+        'grant_type': 'client_credentials',
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'audience': API_AUDIENCE
+    }
+    response = requests.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    token = response.json()['access_token']
+    return token
 
-        return wrapper
-    return requires_auth_decorator
+# Unit tests using Test-Driven Development approach
+class ServerTestCase(unittest.TestCase):
+    def setUp(self):
+        app.testing = True
+        self.client = app.test_client()
+
+    def test_public_endpoint(self):
+        """Test accessing the public endpoint."""
+        response = self.client.get('/public')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'Hello from a public endpoint', response.data)
+
+    def test_private_endpoint_without_token(self):
+        """Test accessing the private endpoint without a token."""
+        response = self.client.get('/private')
+        self.assertEqual(response.status_code, 401)
+
+    def test_private_endpoint_with_token(self):
+        """Test accessing the private endpoint with a valid token."""
+        token = get_access_token()
+        headers = {'Authorization': f'Bearer {token}'}
+        response = self.client.get('/private', headers=headers)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'Hello from a private endpoint', response.data)
+
+if __name__ == '__main__':
+    import sys
+    if 'test' in sys.argv:
+        # Run the tests
+        unittest.main(argv=['first-arg-is-ignored'])
+    else:
+        # Start the Flask server
+        app.run(debug=True)
