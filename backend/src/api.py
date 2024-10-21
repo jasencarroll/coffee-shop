@@ -10,7 +10,7 @@ from functools import wraps
 ##############################################################################
 AUTH0_DOMAIN = 'dev-i6mkw7r670gmhfzt.us.auth0.com'
 ALGORITHMS = ['RS256']
-API_AUDIENCE = 'https://jcscoffeeshop510699.com/auth/api'
+API_AUDIENCE = 'https://jcscoffeeshop510698.com/auth/api'
 
 # APP SETUP
 ##############################################################################
