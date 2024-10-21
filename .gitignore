@@ -1,2 +1,4 @@
 .venv
 node-modules
+/backend/src/.flaskenv
+/backend/src/.env
