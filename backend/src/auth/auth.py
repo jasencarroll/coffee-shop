@@ -8,7 +8,6 @@ from flask import Flask, request, jsonify
 import jwt
 from jwt import exceptions as jwt_exceptions
 import requests
-import unittest
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -106,6 +105,9 @@ def get_access_token():
     return token
 
 # Unit tests using Test-Driven Development approach
+import unittest
+from unittest.mock import patch
+
 class ServerTestCase(unittest.TestCase):
     def setUp(self):
         app.testing = True
@@ -122,10 +124,14 @@ class ServerTestCase(unittest.TestCase):
         response = self.client.get('/private')
         self.assertEqual(response.status_code, 401)
 
-    def test_private_endpoint_with_token(self):
+    @patch('server.get_access_token')
+    @patch('jwt.decode')
+    def test_private_endpoint_with_token(self, mock_jwt_decode, mock_get_token):
         """Test accessing the private endpoint with a valid token."""
-        token = get_access_token()
-        headers = {'Authorization': f'Bearer {token}'}
+        mock_get_token.return_value = 'mocked_jwt_token'
+        mock_jwt_decode.return_value = {'sub': '1234567890', 'name': 'Test User'}
+
+        headers = {'Authorization': f'Bearer {mock_get_token.return_value}'}
         response = self.client.get('/private', headers=headers)
 
         self.assertEqual(response.status_code, 200)
