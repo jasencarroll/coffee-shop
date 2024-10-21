@@ -34,10 +34,16 @@ This will install all of the required packages we selected within the `requireme
 
 From within the `./src` directory first ensure you are working using your created virtual environment.
 
-Each time you open a new terminal session, run:
+Create an .env file with the following information:
 
 ```bash
-export FLASK_APP=api.py;
+FLASK_APP=api.py # type: ignore
+FLASK_ENV=development # type: ignore
+AUTH0_DOMAIN = 'dev-8his2amisscpohz8.us.auth0.com'
+API_AUDIENCE = 'https://jcscoffeeshop510698.com'
+ALGORITHMS = ['RS256']
+CLIENT_ID = 'your_id'
+CLIENT_SECRET = 'your_secret'
 ```
 
 To run the server, execute:
