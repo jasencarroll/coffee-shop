@@ -1,147 +1,158 @@
-# server.py
-
 import os
-from functools import wraps
-
-from dotenv import load_dotenv
-from flask import Flask, request, jsonify
 import jwt
-from jwt import exceptions as jwt_exceptions
-import requests
+import urllib.request
+import json
+import base64
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+from flask import Flask, request, jsonify, abort
+from functools import wraps
+from dotenv import load_dotenv
+
+##############################################################################
+# APPLICATION SETUP ##########################################################
+##############################################################################
 
 # Load environment variables from a .env file
 load_dotenv()
 
-# Configuration variables (ensure these are set in your environment or .env file)
+# Configuration variables
 AUTH0_DOMAIN = os.getenv('AUTH0_DOMAIN')
 API_AUDIENCE = os.getenv('API_AUDIENCE')
 ALGORITHMS = ['RS256']
 CLIENT_ID = os.getenv('CLIENT_ID')
 CLIENT_SECRET = os.getenv('CLIENT_SECRET')
 
-app = Flask(__name__)
+##############################################################################
+# AUTH HELPERS ###############################################################
+##############################################################################
 
 def get_token_auth_header():
-    """Obtains the Access Token from the Authorization Header."""
+    """Extracts the Access Token from the Authorization Header."""
     auth = request.headers.get("Authorization", None)
     if not auth:
-        return {"code": "authorization_header_missing",
-                "description": "Authorization header is expected"}, 401
-
+        abort(401, 'Authorization header is missing.')
+    
     parts = auth.split()
-
-    if parts[0].lower() != "bearer":
-        return {"code": "invalid_header",
-                "description": "Authorization header must start with Bearer"}, 401
+    
+    if parts[0].lower() != 'bearer':
+        abort(401, 'Authorization header must start with Bearer.')
     elif len(parts) == 1:
-        return {"code": "invalid_header",
-                "description": "Token not found"}, 401
+        abort(401, 'Token not found.')
     elif len(parts) > 2:
-        return {"code": "invalid_header",
-                "description": "Authorization header must be Bearer token"}, 401
+        abort(401, 'Authorization header must be Bearer token.')
 
-    token = parts[1]
-    return token
+    return parts[1]
 
-def requires_auth(f):
-    """Decorator to require authentication on routes."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = get_token_auth_header()
-        if isinstance(token, tuple):
-            return jsonify(token[0]), token[1]
+def get_rsa_pem(n, e):
+    """Convert the JWKS 'n' and 'e' values to an RSA public key in PEM format."""
+    # Decode the base64url-encoded modulus and exponent
+    n_bytes = base64.urlsafe_b64decode(n + '==')
+    e_bytes = base64.urlsafe_b64decode(e + '==')
+    
+    # Convert bytes to integers
+    n_int = int.from_bytes(n_bytes, 'big')
+    e_int = int.from_bytes(e_bytes, 'big')
+    
+    # Create RSA key object
+    public_key = rsa.RSAPublicNumbers(e_int, n_int).public_key(default_backend())
+    
+    # Serialize the key to PEM format
+    pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    
+    return pem
 
-        jwks_url = f'https://{AUTH0_DOMAIN}/.well-known/jwks.json'
-        jwk_client = jwt.PyJWKClient(jwks_url)
+def verify_decode_jwt(token):
+    """Verifies and decodes the JWT token."""
+    try:
+        # Retrieve the JWKS from Auth0 domain
+        jsonurl = urllib.request.urlopen(f'https://{AUTH0_DOMAIN}/.well-known/jwks.json')
+        jwks = json.loads(jsonurl.read())
+        
+        # Get the token header without verification
+        unverified_header = jwt.get_unverified_header(token)
 
-        try:
-            signing_key = jwk_client.get_signing_key_from_jwt(token)
+        # Find the key that matches the key ID (kid) in the token header
+        rsa_key = {}
+        for key in jwks['keys']:
+            if key['kid'] == unverified_header['kid']:
+                rsa_key = {
+                    'n': key['n'],
+                    'e': key['e']
+                }
+                break
+
+        # Validate the token if we found the appropriate RSA key
+        if rsa_key:
+            pem_key = get_rsa_pem(rsa_key['n'], rsa_key['e'])
             payload = jwt.decode(
                 token,
-                signing_key.key,
+                pem_key,  # Use the converted PEM-formatted key
                 algorithms=ALGORITHMS,
                 audience=API_AUDIENCE,
                 issuer=f'https://{AUTH0_DOMAIN}/'
             )
-        except jwt_exceptions.ExpiredSignatureError:
-            return jsonify({"code": "token_expired",
-                            "description": "Token is expired"}), 401
-        except (jwt_exceptions.InvalidAudienceError, jwt_exceptions.InvalidIssuerError):
-            return jsonify({"code": "invalid_claims",
-                            "description": "Incorrect claims, please check the audience and issuer"}), 401
-        except jwt_exceptions.PyJWTError as e:
-            return jsonify({"code": "invalid_header",
-                            "description": f"Unable to parse authentication token: {str(e)}"}), 401
+            
+            # Log or print the payload to check its contents
+            print("Decoded JWT Payload: ", payload)
+            return payload
 
-        # Token is valid; print it in the terminal
-        print(f"Authenticated token: {token}")
-        return f(*args, **kwargs)
-    return decorated
+    # Error handling for various JWT errors
+    except jwt.ExpiredSignatureError:
+        abort(401, 'Token expired.')
+    except jwt.InvalidAudienceError:
+        abort(401, 'Invalid audience. Please check the audience in the token.')
+    except jwt.InvalidIssuerError:
+        abort(401, 'Invalid issuer. Please check the issuer in the token.')
+    except jwt.ImmatureSignatureError:
+        abort(401, 'Token is not yet valid (its "nbf" claim is in the future).')
+    except jwt.InvalidIssuedAtError:
+        abort(401, 'Invalid "iat" claim (issued at time).')
+    except jwt.InvalidSignatureError:
+        abort(401, 'Invalid token signature.')
+    except jwt.DecodeError:
+        abort(400, 'Error decoding the token. The token is invalid or malformed.')
+    except jwt.MissingRequiredClaimError as e:
+        abort(400, f'Missing required claim: {str(e)}.')
+    except jwt.InvalidTokenError:
+        abort(401, 'Invalid token. General token validation failure.')
+    except Exception as e:
+        # Generic error handler for any unexpected errors
+        abort(400, f'An error occurred while processing the token: {str(e)}')
 
-@app.route('/public')
-def public():
-    """Public route accessible without authentication."""
-    return jsonify(message="Hello from a public endpoint! You don't need to be authenticated to see this.")
+    # If no RSA key found
+    abort(400, 'Unable to find the appropriate key.')
 
-@app.route('/private')
-@requires_auth
-def private():
-    """Private route accessible only with valid authentication."""
-    return jsonify(message="Hello from a private endpoint! You are authenticated.")
+def check_permissions(permission, payload):
+    """Checks if the required permission is in the JWT payload."""
+    if not permission:
+        # If no specific permission is required, allow the request to pass
+        return True
 
-def get_access_token():
-    """Obtains an access token from Auth0 using client credentials."""
-    url = f'https://{AUTH0_DOMAIN}/oauth/token'
-    headers = {'content-type': 'application/json'}
-    data = {
-        'grant_type': 'client_credentials',
-        'client_id': CLIENT_ID,
-        'client_secret': CLIENT_SECRET,
-        'audience': API_AUDIENCE
-    }
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
-    token = response.json()['access_token']
-    return token
+    if 'permissions' not in payload:
+        abort(400, 'Permissions not included in JWT.')
 
-# Unit tests using Test-Driven Development approach
-import unittest
-from unittest.mock import patch
+    if permission not in payload['permissions']:
+        abort(403, f'Permission "{permission}" not found in the token.')
 
-class ServerTestCase(unittest.TestCase):
-    def setUp(self):
-        app.testing = True
-        self.client = app.test_client()
+    return True
 
-    def test_public_endpoint(self):
-        """Test accessing the public endpoint."""
-        response = self.client.get('/public')
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b'Hello from a public endpoint', response.data)
+##############################################################################
+# AUTH DECORATORS ############################################################
+##############################################################################
 
-    def test_private_endpoint_without_token(self):
-        """Test accessing the private endpoint without a token."""
-        response = self.client.get('/private')
-        self.assertEqual(response.status_code, 401)
-
-    @patch('server.get_access_token')
-    @patch('jwt.decode')
-    def test_private_endpoint_with_token(self, mock_jwt_decode, mock_get_token):
-        """Test accessing the private endpoint with a valid token."""
-        mock_get_token.return_value = 'mocked_jwt_token'
-        mock_jwt_decode.return_value = {'sub': '1234567890', 'name': 'Test User'}
-
-        headers = {'Authorization': f'Bearer {mock_get_token.return_value}'}
-        response = self.client.get('/private', headers=headers)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b'Hello from a private endpoint', response.data)
-
-if __name__ == '__main__':
-    import sys
-    if 'test' in sys.argv:
-        # Run the tests
-        unittest.main(argv=['first-arg-is-ignored'])
-    else:
-        # Start the Flask server
-        app.run(debug=True)
+def requires_auth(permission=''):
+    """Decorator for handling authentication and authorization."""
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            token = get_token_auth_header()
+            payload = verify_decode_jwt(token)
+            check_permissions(permission, payload)
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
